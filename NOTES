@@ -1,0 +1,104 @@
+
+The problem is, as usual, in higher-order arguments.
+
+Simple example:
+
+  double = scc "double" \x. ...
+  map    = scc "map"    \f. \xs. ... f x ...
+  main   = scc "main"   map double xs
+
+double is called by main, not by map.  So we must "capture" the stack
+with double when we pass it to map, like this:
+
+  main   = scc "main"  map (box double) xs
+
+where box x = x.  Or
+
+  main   = scc "main"  let double' = double in map double' xs
+
+
+Getting more complicated (test9):
+
+  
+  g = scc g 
+      let j = \x. double x in
+      \h. h j;
+
+  main = 
+     let h = \f. f 21 in
+     \s. scc main g h;
+
+here 'j' is a function closure, free in the right hand side of 'g'.
+'j' gets its cost centre when 'g' is first evaluated, and it'll be
+<CAF,g>.  This is wrong: 'g' might be called from a deeper context
+(e.g. <TOP,main>, in the definition of 'main'), and we need to record
+that when the RHS of 'j' is executing it is part of this deeper context.
+
+So again, we capture the context when 'g' is called (test10):
+
+  g = scc g 
+      let j = \x. double x in
+      \h. let j1 = j in h j1;
+
+  main = 
+     let h = \f. f 21 in
+     \s. scc main g h;
+
+we must do this for all free variables when we pass them as arguments.
+If we called j directly, it would have the right CCS, the problem is
+when we pass it as an argument.
+
+
+More complicated still (test12):
+
+constr   = scc constr \x. \f. f x;
+deconstr = \p. let f = \x. x in p f;
+
+g = scc g 
+    let j = \x. double x in
+    let p = constr j in
+    \h. scc g1 let p1 = p in h p1;
+
+main = 
+   scc main 
+    let h = \p. deconstr p c in
+    \x. scc main1 g h;
+
+Now, both p and j are free in the lambda expression in the definition
+of g.  Also, j is free in p.  This gives us a problem: we can't box j
+and p, because that doesn't box the j that is free in p.  By the time
+p has been evaluated, it has captured j with a a fixed stack, so it's
+too late.
+
+We have to transform p so as to abstract j (test14).
+
+g = scc g 
+    let j = \x. double x in
+    let p = \j. constr j in
+    \h. scc g1 let j1 = j; p1 = p j1 in h p1;
+
+this works, but it's bad: we lost sharing.  
+
+We can simplify a bit, lifting out the lets:
+
+id       = \x . x;
+constr   = \x. \f. f x;
+
+j = \x. double x;
+p = constr j;
+
+main = 
+   scc main 
+    let h = \p. p id c in
+    \x. scc main1 h p;
+
+The problem is that we can't use the boxing trick for the argument j
+in the definition of p, because at the point where the argument is
+passed, we aren't inside a lambda and therefore boxing doesn't have
+any effect: it can't capture the context.  We can abstract j as a
+parameter, but that might lose sharing.  We may know nothing about the
+function constr, so we can't inline it or know whether it is safe to
+eta-expand.
+
+-----------------------------------------------------------------------------
+

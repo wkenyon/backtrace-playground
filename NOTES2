@@ -1,0 +1,347 @@
+PROPOSAL 2 (subumed by proposal 3, see NOTES3)
+
+calculate the cost centre for a call by:
+
+  CALL ccs_app ccs_lam
+     = ccs_app ++ ccs_lam_rest
+     where
+        (ccs_comm, ccs_app_rest, ccs_lam_rest)
+           = findCommonAncestor ccs_app ccs_lam
+
+e.g. if the cost centre at the app is [main,f,g], the lambda has [main,f,h],
+then the cost centre for the call is [main,f,g,h].
+
+This replaces the current proposal:
+
+  CALL ccs_app ccs_lam
+     | isCAF ccs_lam = ccs_app ++ ccs_lam
+     | otherwise     = ccs_lam
+
+The new one is like evaluation scoping, because we are always pushing
+onto ccs_app within its scope.  The costs of evaluating everything
+within an scc will be attributed to something within the subtree of
+that scc (this was not the case before, because we might replace the
+current cost centre with the one in the lambda).
+
+Advantages:
+
+e.g. in
+
+   main = scc "main"
+          let
+              expensive x = scc "expsensive" ....
+              z = scc "foo" expensive y
+          in
+              ... z ...
+
+we get the stack [main,foo,expensive], showing more clearly the
+dynamic execution.
+
+We get the same result even if we inline "expensive" - good!  (this
+was not true with the old version of CALL, because the costs for
+calling "expensive" we would be attributed to the cost centre attached
+to "expensive" itself, if we were not in a CAF context).
+
+test12 works.
+
+*** XXX later: what about
+
+  scc "main"
+  let
+     f = scc "f" \x -> ..
+  in
+     scc "foo" (f,f)
+
+  so now the closure for f has [main,f], but if we pushed the let
+  inside the scc "foo", the closure would get [main,foo,f].
+
+  So inlining / beta reduction is not in general valid.
+
+Let floating:
+
+  In some cases we could get away without attaching sccs as we float
+  lets past them, but not always.  e.g.
+
+  scc "main"
+  scc "foo"
+  let
+     f = scc "f" \x -> ..
+  in
+     (f,f)
+
+  The closure for f has [main,foo,f]. If we float out f, then it will
+  lose some sccs.  However, if f is called eagerly, then floating out
+  is fine.  However^2, if we attach cost centres as we float, then
+  both are fine.
+
+  Conclusion: when floating a let past an scc, copy the scc into the
+  rhs of the let binding.
+
+Boxing:
+
+  scc "main"
+  let
+     f = scc "f" \x -> ..
+  in
+     scc "foo"
+     let f' = f in
+     (f',f')
+
+  XXX boxing causes the result to be different here.  I guess we just
+  have to accept that.  Justification: the strict call stack would
+  also go through the "foo" cost centre.
+
+
+Note the new CALL is giving a more dynamic call graph than the old
+CALL, which was trying to reflect the *static* call graph.  The
+difference shows up when higher-order arguments are used.  The
+horrible boxing stuff was trying to maintain the illusion of a static
+call graph, but it didn't really work.  The new CALL behaves much
+better: boxing is a no-op (I hope; XXX prove?).
+
+REMAINING PROBLEM:
+
+figure out recursion.  Our current scheme for pushing a cost centre
+onto a stack truncates the stack if a CC is pushed that is already
+somewhere else.  This goes wrong, e.g. see test9/test10
+
+  g = scc g 
+      let j = \x. double x in
+      \h. h j;
+  
+  main = 
+     scc main 
+     let h = \f. f c in
+     \x1. scc main1 g h;
+
+So what happens here is that the closure for h gets [CAF,main], and
+when we come to call it the current CCS is [TOP,main,main1,g].  If we
+truncate the stack we get [TOP,main] - that's bad, we lost the
+context.
+
+We could use Tristan Allwood's idea of elliding part of the stack, to
+get something like [TOP,..,main1,g,main].  That looks a bit strange
+too.  This example doesn't really look like recursion.
+
+-----------------------------------------------------------------------------
+Musings...
+
+------------
+
+   map f xs = case xs of [] -> []; x:xs -> f x : map f xs
+   g = ...
+   main = map g xs
+
+should we atribute the costs of applying g to [main,map,g] or [main,g]?
+
+------------
+
+   main = scc "main"
+          let
+              expensive x = ....
+              z = scc "foo" expensive y
+          in
+              ... z ...
+
+We want to measure the cost of evaluating z.  But this attributes all
+the cost to just [main].  There is no way to find out how much z
+costs.
+
+The results are different if "expensive" is declared at the top level,
+outside the scope of the scc "main".  Arguably these two should behave
+similarly.
+
+This is related to the distinction between evaluation scoping and
+lexical scoping in Sansom's thesis.
+
+  evaluation scoping: the costs of an application are attributed to
+  the cost centre of the application
+
+  lexical scoping: the costs of an application are attributed to the
+  cost centre of the lambda.
+
+We like lexical scoping because
+
+ - it makes it easier to see where costs are attributed
+ - cost centres can be pushed inside lambdas:
+     scc "x" \x . e  === \x . scc "x" e
+
+arguably if we're maintaining a stack, then we should be able to get
+the best of both worlds: the cost of an application is the cost centre
+of the lambda pushed on the cost centre at the call site.
+
+BUT we should do something sensible for the example above.
+
+   main = scc "main"
+          let
+              expensive x = ....
+              z = scc "foo" expensive y
+          in
+              ... z ...
+
+we don't want to see [main,foo,main], we want to see something like
+[main,foo,expensive].  To get this we need an scc on expensive:
+
+   main = scc "main"
+          let
+              expensive x = scc "expsensive" ....
+              z = scc "foo" expensive y
+          in
+              ... z ...
+
+So how should we determine the CCS at a call?
+
+We want
+
+  CALL ccs_app ccs_lam = ???
+
+currently we have
+
+  CALL ccs_app ccs_lam
+     | isCAF ccs_lam = ccs_app ++ ccs_lam
+     | otherwise     = ccs_lam
+
+which does not work in the above case - we would get [main,expensive]
+(but this scheme works quite well for lots of things).
+
+Postulate: it is never the case that ccs_app is a CAF, but ccs_lam is
+not.  CAFs can only call other CAFs.
+
+Perhaps what we need is:
+
+  CALL ccs_app ccs_lam
+     = ccs_app ++ ccs_lam_rest
+     where
+        (ccs_comm, ccs_app_rest, ccs_lam_rest)
+           = findCommonAncestor ccs_app ccs_lam
+
+So in the case where
+
+   ccs_app is MAIN,  ccs_lam is CAF  -> same as before
+
+otherwise we are going to see more detail in the call tree.
+
+   main = scc "main"
+          let
+              (expensive, other) = scc "pair" case E of P ->
+                                    (scc "expensive" \x -> ...,
+                                     scc "other" ...)
+              z = scc "foo" expensive y
+          in
+              ... z ...
+
+Do we want to see [main,pair,expensive] here?
+
+Certainly when there are a chain of indirections we want to see all
+the calls, not just the last one:
+
+  f = scc "f" \x ...
+  g = scc "g" f
+  h = g 3
+
+This should work even if f is inlined.
+
+------------
+
+To think about: which transformations we expect to be valid with
+respect to the cost semantics.
+
+1. Inlining
+
+      f = e
+      g = ... f ...
+
+   should be the same as
+
+      g = ... e ...
+
+   which means for example that if we inline f in:
+
+      f = scc "f" \x ...
+      g = scc "g" f
+      h = g 3
+
+  we get
+
+      g = scc "g" (scc "f" \x ...)
+      h = g 3
+
+  and we should still see the stack [h,g,f].  So the lambda must
+  remember the stack of cost centres attached to it, and append them
+  at the call site.
+
+
+  Another example:
+
+    main = \x. scc main
+           let g = \x. double x in
+           scc g (g c);
+      
+  should be the same if we inline g:
+
+    main = \x. scc main
+           scc g ((\x. double x) c);
+
+  and indeed it is now (it wasn't before).
+
+
+2. Boxing.  Previously boxing was a transformation that changed the
+cost semantics, which is undesirable.
+
+
+-----------
+
+To think about: getting useful costs for CAFs.
+
+We should attribute the costs for a CAF to the site that is evaluating
+it.  This just adds more information to the profile for free.
+
+Note that the cost centres attached to lambdas in a CAF should still
+just be [CAF,...] because we don't want the evaluation site of the CAF
+showing up when we call functions from it.
+
+-----------
+
+To think about: whether we still need to do boxing or not.
+
+  double = scc "double" \x. ...
+  map    = scc "map"    \f. \xs. ... f x ...
+  main   = scc "main"   map double xs
+
+the stack we will see without boxing is [main,map,double].  That is
+arguably a reasonable stack to see.
+
+In fact, we want boxing to be a transformation that changes nothing
+about the cost attribution.
+
+  main   = scc "main" let double' = double in map double' xs
+
+So double' is allocated with stack [main], it evaluates to a lambda
+with stack [main,double] attached.  When calling it in map:
+  - current stack is [main,map], lambda is [main,double]
+  - common ancestor: [main]
+  - stack for evaluating call: [main,map] ++ [double]
+  - yay!
+
+
+XXXX BUT see test9/test10, in this case boxing does change the cost
+attribution.
+
+-----------
+
+To think about: whether we can do partial profiling.
+
+  - consistent representation of closures.  There has to be some way
+    to know for a thunk whether it is profiled or not: if profiled
+    code enters an unprofiled thunk, it sets the CCCS to "unprofiled",
+    but if unprofiled code enters a profiled thunk, the code for the
+    thunk will have to set CCCS itself (a thunk knows where it saved
+    its CCCS).
+
+-----------
+
+To think about: whether we can keep track of call stacks in
+GHCi. (related to partial profiling above).
+
+If we abstract the RTS functionality that deals with cost centres so
+that GHCi can use it, this should be feasible.
