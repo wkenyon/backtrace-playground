@@ -1,0 +1,11 @@
+main = push main \x. f1;
+f1 = push f1 f2;
+f2 = push f2 f3;
+f3 = push f3 f4;
+f4 = push f4 head nil;
+
+head = \xs. push head case xs of { Nil . break 0;
+                                   Cons y ys . y; };
+
+cons = \x. \y. Cons x y;
+nil = Nil;

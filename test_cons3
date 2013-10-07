@@ -1,0 +1,23 @@
+i1 = 1;
+i2 = 2;
+i3 = 3;
+i4 = 7;
+i5 = 7;
+l1 = Nil;
+l2 = Cons i1 l1;
+l3 = Cons i2 l2;
+l4 = Cons i3 l3;
+l5 = Cons i4 l4;
+l6 = Cons i5 l5;
+
+map = push map \f. \xs. case xs of { Nil . Nil ;
+                                           Cons x xs . let x' = f x in 
+                                                       let xs' = map f xs in 
+                                                       Cons x' xs' ; } ;
+add = push add \x.\y.x+y;
+
+sum = push sum \xs . case xs of { Nil . 0;
+                                  Cons x xs . x + sum xs ; } ; 
+
+apply1 = push apply \x. break let y = 1 in x y;
+main = push main \x . let l = map add l6 in (let m = map apply1 l in break sum m) ;

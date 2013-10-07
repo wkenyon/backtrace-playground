@@ -1,0 +1,34 @@
+f = \d . d+d;
+i1 = 1;
+i2 = 2;
+i3 = 3;
+i4 = 7;
+i5 = 7;
+j1 = 4;
+j2 = 5;
+j3 = 6;
+j4 = 8;
+j5 = 8;
+l1 = Nil;
+l2 = Cons i1 l1;
+l3 = Cons i2 l2;
+l4 = Cons i3 l3;
+l5 = Cons i4 l4;
+l6 = Cons i5 l5;
+k1 = Nil;
+k2 = Cons j1 k1;
+k3 = Cons j2 k2;
+k4 = Cons j3 k3;
+k5 = Cons j4 k4;
+k6 = Cons j5 k5;
+
+append = push append \xs. \ys. case xs of {Nil . ys;
+                               Cons x xs . let app = append xs ys in Cons x app;};
+
+sum = push sum \xs. case xs of {Nil . 0;
+                       Cons x xs . x + sum xs;};
+
+
+main = push main \x. sum appendlist;
+
+appendlist = push appendList append k6 l6;

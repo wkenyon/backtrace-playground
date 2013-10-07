@@ -1,5 +1,0 @@
-f = push f \x . (g x)+x;
-
-g = push g \z . z+z;
-
-main = \x. let y = 1 in f y;

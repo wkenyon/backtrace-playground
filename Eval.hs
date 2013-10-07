@@ -1,22 +1,25 @@
 {-# OPTIONS -fglasgow-exts #-}
+{-# OPTIONS -XImpredicativeTypes #-}
 module Eval where
 
 import Syntax
-import EvalTypes
-
+import Control.Monad.Writer (Writer)
+import qualified Control.Monad.Writer as W
 import Control.Monad.State
-import Control.Monad.Writer
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Text.PrettyPrint
+import Data.Maybe
+import qualified Debug.Trace as Trace
+import EvalTypes
 
--- -----------------------------------------------------------------------------
 
-type E a = StateT (Heap,Costs,Int) (Writer [String]) a
+type FreshID=Int
+
+type E a = StateT (Heap,FreshID) (Writer [String]) a
 
 trace :: String -> E ()
-trace s = tell [s]
-
+trace s = Trace.trace s $ W.tell [s]
 -- -----------------------------------------------------------------------------
 -- The evaluator
 
@@ -36,103 +39,83 @@ trace s = tell [s]
 --
 --	* The scc rule *pushes* the Label on the current Stack.
 
-eval :: Stack -> Expr -> E (Stack,Expr)
+
 eval ccs (EVar x) = eval_var ccs x 
-
-eval ccs (EInt i) =
-   return (ccs, EInt i)
-
-eval ccs (ELam x e) =
-   return (ccs, ELam x e)
-
-eval ccs (ELet (x,e1) e2) = do 
-   trace ("Heap closure for " ++ x ++ ", Stack = " ++ showCCS ccs)
-   modifyHeap (\h -> Map.insert x (ccs,e1) h)
-   eval ccs e2
-
+eval ccs (EInt i) = return (ccs,EInt i)
+eval ccs (ELam x e) = return (ccs,ELam x e)
+eval ccs (ECons cs) = return (ccs,ECons cs)
+eval ccs (ELet (x,e1) e2) = modifyHeap (\h -> Map.insert x (ccs,e1) h) >> eval ccs e2
 eval ccs (EPlus e1 e2) = do
    (_,EInt x) <- eval ccs e1
    (_,EInt y) <- eval ccs e2
-   tick ccs
-   return (ccs, EInt (x+y))
+   return (ccs,EInt (x+y))
+
+eval ccs (ECase e alts) = do
+   (_,ECons (name,vars)) <- eval ccs e
+   let (vars',e') = fromJust $ lookup name $ map (\((name,vars),e)->(name,(vars,e))) alts
+   eval ccs $ substList vars' vars e'
+   
 
 eval ccs (EApp f x) = do
    (lam_ccs, ELam y e) <- eval ccs f
    eval lam_ccs (subst y x e)
+   
 
-eval ccs (EPush cc e) =
-   eval (pushCC cc ccs) e
+eval ccs (EPush cc e) = 
+   eval  (pushCC cc ccs) e
+  
+eval ccs (EBreak e) = do
+   trace $ {-(show $ pprExpr e) ++-} ('\n':showCCS ccs)
+   eval ccs e
 
 eval_var ccs x = do
    r <- lookupHeap x
-   case r of
-	(ccs', EInt i) ->
-	   return (ccs', EInt i)
+   let f c | cafStack == c = ccs
+           | otherwise     = c
 
-	(ccsv, ELam y e) ->
-	   enter ccs ccsv x (ELam y e)
+   case r of
+	(ccs', EInt i) -> do
+	   return (f ccs',EInt i)
+        (ccs', ECons cs) -> do
+           e' <- eHat $ ECons cs
+           return (f ccs',e') 
+	(ccsv, ELam y e) -> do
+           e' <- eHat $ ELam y e
+	   enter ccs (f ccsv) x e'
 
 	(ccs',e) -> do 
-           trace ("Eval: " ++ x)
-	   modifyHeap (\h -> Map.delete x h)
+           modifyHeap (\h -> Map.delete x h)
 		-- delete it from the heap so we can get blackholes
-	   (ccsv, v) <- eval ccs' e
-           trace ("Update: " ++ x ++ ", Stack = " ++ showCCS ccsv)
-	   update x (ccsv,v)
-	   enter ccs ccsv x v
+           (ccsv, v) <- eval (f ccs') e
+           update x (ccsv,v)
+           v' <- eHat v 
+	   enter ccs (f ccsv) x v'
 
-enter ccs ccsv x (EInt i)   = return (ccsv, EInt i)
+   
+enter ccs ccsv x (EInt i)   = return (ccs,EInt i)
+enter ccs ccsv x (ECons cs) = return (ccs,ECons cs)
 enter ccs ccsv x (ELam y e) = do
   let call_ccs = funCall ccs ccsv
-  trace ("Call: " ++ x ++ ", cur Stack = " ++ showCCS ccs
-           ++ ", call Stack = " ++ showCCS call_ccs)
-  return (call_ccs, ELam y e)
+  return (call_ccs,ELam y e)
+enter ccs ccsv x e = error $ show $ text "Match Error:" <+> pprExpr e
 
--- -----------------------------------------------------------------------------
--- Stack operations
 
-funCall ccs lam_ccs
-  | not (null lam_ccs) && last lam_ccs == "CAF"  
-  = {- trace ("funCall, ccs = " ++ show ccs) $ -} ccs `appendCCS` lam_ccs
-  | otherwise
-  = {- trace ("funCall, lam_ccs = " ++ show lam_ccs) -} lam_ccs
+modifyHeap f = modify (\(h,i) -> (f h, i))
 
-appendCCS :: Stack -> Stack -> Stack
-appendCCS ccs ["CAF"] = ccs
-appendCCS ccs (cc:ccs') = pushCC cc (appendCCS ccs ccs')
 
-pushCC cc ccs
-  | Just trunc <- findCC cc ccs = trunc
-  | otherwise                   = cc:ccs
-
-findCC cc [] = Nothing
-findCC cc (cc':ccs)
-  | cc == cc'  = Just (cc':ccs)
-  | otherwise  = findCC cc ccs
-
--- -----------------------------------------------------------------------------
--- Misc.
-
-tick ccs = modify (\ (h,c,i) -> (h, Map.insertWith (+) ccs 1 c, i))
-
-modifyHeap f = modify (\(h,c,i) -> (f h, c, i))
-
-lookupHeap :: Var -> E (Stack,Expr)
 lookupHeap x = do
-   (h,c,i) <- get
+   (h,i) <- get
    case Map.lookup x h of
 	Just z -> return z
-	Nothing -> error ("unbound variable " ++ x)
+	Nothing -> error ("unbound variable " ++ show x)
 
 update x val = modifyHeap (\h -> Map.insert x val h)
 
-genSym :: E Int
-genSym = do
-  (h,c,i) <- get
-  put (h,c,i+1)
-  return i
-
-isVal (ELam _ _) = True
-isVal (EInt _)   = True
-isVal _          = False
+--launchbury's ^ transform
+eHat :: Expr -> E Expr
+eHat e = do
+  (h,i) <- get
+  let (e',i') = runState (hat e) i
+  put (h,i')
+  return e'
 

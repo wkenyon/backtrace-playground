@@ -1,0 +1,17 @@
+map = push map \f. \xs. case xs of { Nil . Nil ;
+                                           Cons x xs . (cons (f x) (map f xs));};
+
+
+
+add = push add \x.\y.x+y;
+
+sum = push sum \xs . case xs of { Nil . 0;
+                                  Cons x xs . x + sum xs ; } ; 
+
+apply1 = push apply \x. break let y = 1 in x y;
+main = push main \x . let l = map add list in (let m = map apply1 l in break sum m) ;
+
+cons = \x. \y. Cons x y;
+nil = Nil;
+
+list = cons 1 (cons 2 (cons 3 (cons 4 (cons 5 (cons 6 (cons 7 (cons 8 (cons 9 nil))))))));

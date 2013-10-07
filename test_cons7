@@ -1,0 +1,13 @@
+main = push main \x. f1 manyArgs;
+f1 = push f1 \f. f2 (f nil);
+f2 = push f2 \f. f3 (f nil);
+f3 = push f3 \f. f4 (f nil nil);
+f4 = push f4 \f. f nil;
+
+manyArgs = push manyArgs \w.\x.\y.\z. head;
+
+cons = \x. \y. Cons x y;
+nil = Nil;
+
+head = \xs. push head case xs of { Nil . break 0;
+                                   Cons y ys . y; };
